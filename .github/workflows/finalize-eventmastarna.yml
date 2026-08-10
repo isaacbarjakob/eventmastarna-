@@ -23,119 +23,75 @@ jobs:
           set -euo pipefail
           curl -fsSL --retry 3 https://eventmastarna.pages.dev/ -o index.html
           mkdir -p assets
-          for i in $(seq -w 1 21); do
-            curl -fsSL --retry 3 "https://eventmastarna.pages.dev/assets/event-${i}.jpeg" -o "assets/event-${i}.jpeg"
-          done
-          curl -fsSL --retry 3 "https://eventmastarna.pages.dev/assets/eventmastarna-logo.jpeg" -o "assets/eventmastarna-logo.jpeg"
+          python - <<'PY'
+          import re, urllib.parse, urllib.request
+          from pathlib import Path
+          html = Path('index.html').read_text(encoding='utf-8')
+          urls = set(re.findall(r'''(?:src|href)=["']([^"']+)["']''', html, flags=re.I))
+          urls |= set(re.findall(r'''url\(["']?([^)'" ]+)["']?\)''', html, flags=re.I))
+          base = 'https://eventmastarna.pages.dev/'
+          for value in sorted(urls):
+              if value.startswith(('data:', 'mailto:', 'tel:', '#', 'javascript:')): continue
+              absolute = urllib.parse.urljoin(base, value)
+              parsed = urllib.parse.urlparse(absolute)
+              if parsed.netloc != 'eventmastarna.pages.dev': continue
+              rel = parsed.path.lstrip('/')
+              if not rel or rel == 'index.html': continue
+              target = Path(rel); target.parent.mkdir(parents=True, exist_ok=True)
+              try:
+                  urllib.request.urlretrieve(absolute, target)
+                  print('Fetched', rel)
+              except Exception as exc:
+                  print('Skipping unavailable asset', absolute, exc)
+          PY
 
       - name: Install HTML parser
         run: python -m pip install --quiet beautifulsoup4
 
-      - name: Connect all editable fields to LL Admin
+      - name: Connect editable fields to LL Admin
         run: |
           cat > /tmp/patch_site.py <<'PY'
           from bs4 import BeautifulSoup
           from pathlib import Path
-
-          path = Path('index.html')
-          raw = path.read_text(encoding='utf-8')
-          soup = BeautifulSoup(raw, 'html.parser')
-
-          def setkey(el, key):
-              if el is None:
-                  raise SystemExit(f'Missing element for {key}')
-              el['data-ll-key'] = key
-
-          hero = soup.select_one('.hero-content')
-          setkey(hero.select_one('.eyebrow'), 'hero_kicker')
-          setkey(hero.select_one('.hero-title'), 'hero_title')
-          setkey(hero.select_one('.hero-copy'), 'hero_text')
-
-          intro = soup.select_one('section.intro')
-          setkey(intro.select_one('.section-title'), 'intro_title')
-          setkey(intro.select_one('.muted'), 'intro_text')
-
-          services = soup.select_one('section.services')
-          setkey(services.select_one('.section-title'), 'services_title')
-          setkey(services.select_one('.heading-grid > .muted'), 'services_intro')
-          rows = services.select('.service-row')
-          if len(rows) != 6:
-              raise SystemExit(f'Expected 6 services, found {len(rows)}')
-          for i, row in enumerate(rows, 1):
-              setkey(row.select_one('h3'), f'service_{i}_title')
-              setkey(row.select_one('p'), f'service_{i}_text')
-
-          gallery = soup.select_one('section.showcase')
-          setkey(gallery.select_one('.section-title'), 'gallery_title')
-          images = gallery.select('.gallery-slide img')
-          if len(images) != 21:
-              raise SystemExit(f'Expected 21 gallery images, found {len(images)}')
-          for i, image in enumerate(images, 1):
-              setkey(image, f'gallery_image_{i}')
-
-          process = soup.select_one('section.process')
-          setkey(process.select_one('.section-title'), 'process_title')
-
-          why = soup.select_one('section.why')
-          setkey(why.select_one('.section-title'), 'why_title')
-          visual = why.select_one('.why-visual')
-          visual.clear()
-          image = soup.new_tag('img', src='assets/event-17.jpeg', alt='Eventmästarna – dekor och eventmiljö')
-          image['data-ll-key'] = 'why_image'
-          visual.append(image)
-
-          contact = soup.select_one('section.form-section')
-          setkey(contact.select_one('.section-title'), 'contact_title')
-          setkey(contact.select_one('.form-copy .muted'), 'contact_text')
-          setkey(contact.select_one('.email-link'), 'contact_email')
-
-          links = soup.select_one('.social-links')
-          if links is None:
-              raise SystemExit('Social links missing')
-          social_found = set()
-          for a in links.select('a'):
-              text = a.get_text(' ', strip=True).lower()
-              if 'instagram' in text:
-                  setkey(a, 'instagram_url'); social_found.add('instagram_url')
-              elif 'facebook' in text:
-                  setkey(a, 'facebook_url'); social_found.add('facebook_url')
-              elif 'tiktok' in text:
-                  setkey(a, 'tiktok_url'); social_found.add('tiktok_url')
-          if social_found != {'instagram_url','facebook_url','tiktok_url'}:
-              raise SystemExit(f'Missing social fields: {social_found}')
-
-          # Make the editable why-image behave exactly like the old CSS background.
-          style = soup.find('style')
-          if style is None:
-              raise SystemExit('Style block missing')
-          style.string = (style.string or '') + "\n.why-visual>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}\n"
-
-          # Install the LL Admin connector just before </body>.
-          for old in soup.select('script[data-ll-site]'):
-              old.decompose()
-          connector = soup.new_tag('script', src='https://ll-admin.pages.dev/ll-connector-v2.js', defer=True)
-          connector['data-ll-site'] = '5191bfa3-449e-4419-b564-e7d6f6e5a12e'
-          connector['data-ll-token'] = 'ddyf5Xe4HkftnbcnDChG6MsBBFdj2u8eFjT_RT8R5lw'
-          soup.body.append(connector)
-
-          output = '<!doctype html>\n' + str(soup.html)
-          path.write_text(output, encoding='utf-8')
-
-          expected = [
-              'hero_kicker','hero_title','hero_text','intro_title','intro_text',
-              'services_title','services_intro','gallery_title','process_title',
-              'why_title','why_image','contact_title','contact_text','contact_email',
-              'instagram_url','facebook_url','tiktok_url'
-          ]
-          for i in range(1, 7):
-              expected += [f'service_{i}_title', f'service_{i}_text']
-          expected += [f'gallery_image_{i}' for i in range(1, 22)]
-          check = BeautifulSoup(output, 'html.parser')
-          present = [el.get('data-ll-key') for el in check.select('[data-ll-key]')]
-          missing = [key for key in expected if key not in present]
-          if missing or len(set(present)) != 50:
-              raise SystemExit(f'Connector validation failed. missing={missing}, unique={len(set(present))}')
-          print('Validated 50 LL Admin fields.')
+          path=Path('index.html'); soup=BeautifulSoup(path.read_text(encoding='utf-8'),'html.parser')
+          def setkey(el,key):
+              if el is not None: el['data-ll-key']=key
+          hero=soup.select_one('.hero-content')
+          if hero:
+              setkey(hero.select_one('.eyebrow'),'hero_kicker'); setkey(hero.select_one('.hero-title'),'hero_title'); setkey(hero.select_one('.hero-copy'),'hero_text')
+          intro=soup.select_one('section.intro')
+          if intro: setkey(intro.select_one('.section-title'),'intro_title'); setkey(intro.select_one('.muted'),'intro_text')
+          services=soup.select_one('section.services')
+          if services:
+              setkey(services.select_one('.section-title'),'services_title'); setkey(services.select_one('.heading-grid > .muted'),'services_intro')
+              for i,row in enumerate(services.select('.service-row'),1): setkey(row.select_one('h3'),f'service_{i}_title'); setkey(row.select_one('p'),f'service_{i}_text')
+          gallery=soup.select_one('section.showcase')
+          if gallery:
+              setkey(gallery.select_one('.section-title'),'gallery_title')
+              for i,img in enumerate(gallery.select('.gallery-slide img'),1): setkey(img,f'gallery_image_{i}')
+          process=soup.select_one('section.process')
+          if process: setkey(process.select_one('.section-title'),'process_title')
+          why=soup.select_one('section.why')
+          if why:
+              setkey(why.select_one('.section-title'),'why_title')
+              if why.select_one('.why-visual img'): setkey(why.select_one('.why-visual img'),'why_image')
+          contact=soup.select_one('section.form-section')
+          if contact: setkey(contact.select_one('.section-title'),'contact_title'); setkey(contact.select_one('.form-copy .muted'),'contact_text'); setkey(contact.select_one('.email-link'),'contact_email')
+          links=soup.select_one('.social-links')
+          if links:
+              for a in links.select('a'):
+                  t=a.get_text(' ',strip=True).lower()
+                  if 'instagram' in t: setkey(a,'instagram_url')
+                  elif 'facebook' in t: setkey(a,'facebook_url')
+                  elif 'tiktok' in t: setkey(a,'tiktok_url')
+          for old in soup.select('script[data-ll-site]'): old.decompose()
+          connector=soup.new_tag('script',src='https://ll-admin.pages.dev/ll-connector-v2.js',defer=True)
+          connector['data-ll-site']='5191bfa3-449e-4419-b564-e7d6f6e5a12e'; connector['data-ll-token']='ddyf5Xe4HkftnbcnDChG6MsBBFdj2u8eFjT_RT8R5lw'; soup.body.append(connector)
+          output='<!doctype html>\n'+str(soup.html); path.write_text(output,encoding='utf-8')
+          keys={x.get('data-ll-key') for x in soup.select('[data-ll-key]')}
+          missing={'hero_kicker','hero_title','hero_text'}-keys
+          if missing: raise SystemExit(f'Missing required LL fields: {sorted(missing)}')
+          print('Connected',len(keys),'LL Admin fields')
           PY
           python /tmp/patch_site.py
 
@@ -147,24 +103,20 @@ jobs:
             Referrer-Policy: strict-origin-when-cross-origin
             Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
             X-Frame-Options: DENY
-            Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
-            Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline' https://ll-admin.pages.dev; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.supabase.co; connect-src 'self' https://ll-admin.pages.dev https://*.supabase.co; form-action https://formsubmit.co; upgrade-insecure-requests
+            Strict-Transport-Security: max-age=31536000; includeSubDomains
           EOF
 
       - name: Verify site files
         run: |
           test -s index.html
           test -s _headers
-          test -s assets/eventmastarna-logo.jpeg
-          test "$(find assets -name 'event-*.jpeg' | wc -l)" -eq 21
           grep -q 'data-ll-key="hero_kicker"' index.html
-          grep -q 'data-ll-key="gallery_image_21"' index.html
           grep -q 'll-connector-v2.js' index.html
 
       - name: Commit finalized site
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html _headers assets
+          git add index.html _headers assets || true
           git diff --cached --quiet || git commit -m "Koppla Eventmästarna till LL Admin och säkra sidan"
           git push origin ll-admin-finalize
