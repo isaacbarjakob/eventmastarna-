@@ -1,0 +1,1 @@
+replace low-resolution event images with originals
